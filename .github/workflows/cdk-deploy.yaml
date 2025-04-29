@@ -1,0 +1,332 @@
+name: Savings Plan Service CI/CD Pipeline
+
+# This workflow handles the continuous integration and deployment pipeline for the Savings Plan Service
+# It implements a secure, auditable deployment process suitable for a regulated Bitcoin broker
+# The workflow supports dev, staging, and production environments with appropriate approval gates
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'cdk/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'cdk/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, staging, production]
+
+# Environment variables used throughout the workflow
+env:
+  AWS_REGION: us-east-1
+  NODE_VERSION: '18'
+  CDK_VERSION: '2.126.0'
+
+# Permission needed for GitHub OIDC with AWS
+permissions:
+  id-token: write  # Required for OIDC authentication with AWS
+  contents: read   # Required to check out the repository
+
+jobs:
+  # Validate and build the CDK code
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'cdk/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./cdk
+        run: npm ci
+        # Using 'npm ci' ensures exact versions from package-lock.json
+        # are installed, critical for reproducibility in regulated environments
+
+      - name: Type check
+        working-directory: ./cdk
+        run: npm run type-check
+        # TypeScript validation catches type errors early
+        # This is essential for financial services where correctness is critical
+
+      - name: Run unit tests
+        working-directory: ./cdk
+        run: npm test
+        # All infrastructure changes must be tested
+        # Test failure prevents deployment, reducing operational risk
+
+      - name: Run ESLint
+        working-directory: ./cdk
+        run: npm run lint
+        # Code quality checks ensure maintainable infrastructure code
+        # This supports long-term stability of the platform
+
+      # Cache the build output for deployment jobs
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-build
+          path: |
+            cdk/lib
+            cdk/bin
+            cdk/node_modules
+            cdk/cdk.json
+            cdk/package.json
+          retention-days: 1
+        # Sharing build artifacts between jobs ensures consistency
+        # and prevents any discrepancies between test and deployment code
+
+  # Deploy to development environment
+  deploy-dev:
+    name: Deploy to Dev
+    needs: build-and-test
+    # Only deploy to dev on develop branch pushes or manual triggers
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cdk-build
+          path: cdk
+        # Using the verified build artifacts from the previous job
+        # ensures we deploy exactly what was tested
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+        # Using role assumption instead of access keys
+        # enhances security by avoiding long-lived credentials
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install CDK globally
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+        # Pinning the CDK version ensures deployment consistency
+
+      - name: Generate CDK diff for Dev
+        working-directory: ./cdk
+        run: cdk diff --app "npx ts-node bin/savings-plan-service.ts" --context environment=dev SavingsPlanServiceStack-Dev
+        # Generating and reviewing diffs before deployment
+        # is a critical safety check for infrastructure changes
+
+      - name: Deploy to Dev
+        working-directory: ./cdk
+        run: |
+          cdk deploy --app "npx ts-node bin/savings-plan-service.ts" \
+            --context environment=dev \
+            --require-approval never \
+            SavingsPlanServiceStack-Dev
+        # Dev deployments don't require interactive approval
+        # but are still logged for audit purposes
+
+      - name: Record deployment in audit trail
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          DEPLOYER="${{ github.actor }}"
+          DEPLOYMENT_ID="${{ github.run_id }}"
+          COMMIT_SHA="${{ github.sha }}"
+          
+          aws s3 cp - s3://${{ secrets.AUDIT_BUCKET }}/deployments/dev/${TIMESTAMP}-${DEPLOYMENT_ID}.json <<EOF
+          {
+            "timestamp": "${TIMESTAMP}",
+            "environment": "dev",
+            "service": "savings-plan-service",
+            "deployer": "${DEPLOYER}",
+            "deploymentId": "${DEPLOYMENT_ID}",
+            "commitSha": "${COMMIT_SHA}",
+            "workflow": "${{ github.workflow }}"
+          }
+          EOF
+        # For regulated financial services, all deployments 
+        # must be recorded in an immutable audit trail for compliance purposes
+
+  # Deploy to staging environment
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build-and-test
+    # Only deploy to staging on main branch pushes or manual triggers
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cdk-build
+          path: cdk
+        # Using the verified build artifacts from the previous job
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+        # Each environment should have appropriate IAM role permissions
+        # following the principle of least privilege
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install CDK globally
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Generate CDK diff for Staging
+        working-directory: ./cdk
+        run: cdk diff --app "npx ts-node bin/savings-plan-service.ts" --context environment=staging SavingsPlanServiceStack-Staging
+        # Diff generation is particularly important for staging
+        # as it's the last environment before production
+
+      - name: Deploy to Staging
+        working-directory: ./cdk
+        run: |
+          cdk deploy --app "npx ts-node bin/savings-plan-service.ts" \
+            --context environment=staging \
+            --require-approval never \
+            SavingsPlanServiceStack-Staging
+        # For a regulated Bitcoin broker, staging environment
+        # should mirror production as closely as possible
+
+      - name: Record deployment in audit trail
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          DEPLOYER="${{ github.actor }}"
+          DEPLOYMENT_ID="${{ github.run_id }}"
+          COMMIT_SHA="${{ github.sha }}"
+          
+          aws s3 cp - s3://${{ secrets.AUDIT_BUCKET }}/deployments/staging/${TIMESTAMP}-${DEPLOYMENT_ID}.json <<EOF
+          {
+            "timestamp": "${TIMESTAMP}",
+            "environment": "staging",
+            "service": "savings-plan-service",
+            "deployer": "${DEPLOYER}",
+            "deploymentId": "${DEPLOYMENT_ID}",
+            "commitSha": "${COMMIT_SHA}",
+            "workflow": "${{ github.workflow }}"
+          }
+          EOF
+        # The audit trail structure is consistent across environments
+        # to facilitate compliance reporting and incident investigation
+
+  # Production deployment requires manual approval
+  deploy-production:
+    name: Deploy to Production
+    needs: deploy-staging
+    # Production deployments require successful staging deployment
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      # The environment configuration in GitHub requires approval
+      # before this job runs, providing a compliance-friendly approval gate
+      url: https://console.aws.amazon.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cdk-build
+          path: cdk
+        # Using the verified build artifacts ensures consistency
+        # between environments, critical for regulated financial services
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+        # Production IAM roles should have strict permissions
+        # and potentially require MFA for role assumption
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install CDK globally
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Generate CDK diff for Production
+        working-directory: ./cdk
+        run: cdk diff --app "npx ts-node bin/savings-plan-service.ts" --context environment=production SavingsPlanServiceStack-Production
+        # Production diff is critical for final review
+        # This should be reviewed carefully by the approver
+
+      - name: Retrieve secrets from AWS Secrets Manager
+        run: |
+          # Fetch production-specific secrets and store them as environment variables
+          SECRETS=$(aws secretsmanager get-secret-value --secret-id prod/savings-plan-service --query SecretString --output text)
+          echo "::add-mask::$SECRETS"
+          echo "PROD_SECRETS=$SECRETS" >> $GITHUB_ENV
+        # For regulated environments, secrets should be stored
+        # in AWS Secrets Manager, not in GitHub Secrets when possible
+
+      - name: Deploy to Production
+        working-directory: ./cdk
+        run: |
+          cdk deploy --app "npx ts-node bin/savings-plan-service.ts" \
+            --context environment=production \
+            --require-approval never \
+            SavingsPlanServiceStack-Production
+        # While --require-approval is set to never here,
+        # the GitHub environment protection rules provide the approval gate
+
+      - name: Record deployment in audit trail
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          DEPLOYER="${{ github.actor }}"
+          DEPLOYMENT_ID="${{ github.run_id }}"
+          COMMIT_SHA="${{ github.sha }}"
+          APPROVER="${{ github.event.inputs.approver || github.actor }}"
+          
+          aws s3 cp - s3://${{ secrets.AUDIT_BUCKET }}/deployments/production/${TIMESTAMP}-${DEPLOYMENT_ID}.json <<EOF
+          {
+            "timestamp": "${TIMESTAMP}",
+            "environment": "production",
+            "service": "savings-plan-service", 
+            "deployer": "${DEPLOYER}",
+            "approver": "${APPROVER}",
+            "deploymentId": "${DEPLOYMENT_ID}",
+            "commitSha": "${COMMIT_SHA}",
+            "workflow": "${{ github.workflow }}"
+          }
+          EOF
+        # Production deployments record the approver
+        # This dual-control approach is required for regulated financial services
+
+      - name: Send deployment notification
+        run: |
+          # Send deployment notification to SNS topic
+          aws sns publish \
+            --topic-arn ${{ secrets.DEPLOYMENT_NOTIFICATION_TOPIC }} \
+            --message "Production deployment of Savings Plan Service completed. Deployment ID: ${{ github.run_id }}, Commit: ${{ github.sha }}, Deployer: ${{ github.actor }}" \
+            --subject "Production Deployment Completed"

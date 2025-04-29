@@ -1,0 +1,4 @@
+{
+    "aws-cdk:use-localstack": true,
+    "local-endpoint": "http://localhost:4566"
+  }

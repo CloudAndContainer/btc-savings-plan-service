@@ -1,0 +1,135 @@
+name: CDK Bootstrap Workflow
+
+# This workflow handles the initial CDK bootstrap process for all environments
+# CDK bootstrap creates the foundational resources needed for CDK deployments
+
+on:
+  # Manual trigger with environment selection
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to bootstrap'
+        required: true
+        type: choice
+        options: [dev, staging, production]
+        default: 'dev'
+      region:
+        description: 'AWS Region'
+        required: true
+        default: 'us-east-1'
+        type: string
+
+# Environment variables used throughout the workflow
+env:
+  NODE_VERSION: '18'
+  CDK_VERSION: '2.1012.0'
+  # The CDK bootstrap version determines the feature set available
+  CDK_BOOTSTRAP_VERSION: '8'
+
+# Permission needed for GitHub OIDC with AWS
+permissions:
+  id-token: write  # Required for OIDC authentication with AWS
+  contents: read   # Required to check out the repository
+
+jobs:
+  # Bootstrap job sets up the CDK deployment infrastructure
+  bootstrap:
+    name: Bootstrap CDK Environment
+    runs-on: ubuntu-latest
+    # Use GitHub environments to manage environment-specific secrets and approvals
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # Developer note: We need the full repository to access CDK configuration
+        # and to ensure audit consistency with deployment workflows
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Developer note: Caching npm dependencies speeds up workflow execution
+          # and ensures consistency between bootstrap and deployment processes
+          cache: 'npm'
+          cache-dependency-path: 'cdk/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./cdk
+        run: npm ci
+        # Developer note: Using 'npm ci' instead of 'npm install' ensures exact
+        # versions from package-lock.json are installed, critical for reproducibility
+        # in regulated environments
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-bootstrap-role
+          aws-region: ${{ github.event.inputs.region }}
+
+      - name: Install CDK globally
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Pre-bootstrap checks
+        run: |
+          echo "Performing pre-bootstrap verification for ${{ github.event.inputs.environment }} in ${{ github.event.inputs.region }}"
+          
+          # Verify AWS account matches the expected account for the environment
+          CURRENT_ACCOUNT=$(aws sts get-caller-identity --query "Account" --output text)
+          EXPECTED_ACCOUNT="${{ secrets.AWS_ACCOUNT_ID }}"
+          
+          if [ "$CURRENT_ACCOUNT" != "$EXPECTED_ACCOUNT" ]; then
+            echo "ERROR: Account mismatch. Connected to $CURRENT_ACCOUNT but expected $EXPECTED_ACCOUNT"
+            exit 1
+          fi
+          
+          echo "Account verification successful: $CURRENT_ACCOUNT"
+
+      - name: Run CDK Bootstrap
+        working-directory: ./cdk
+        run: |
+          # Create a specific qualifier for the environment to isolate resources
+          QUALIFIER="${{ github.event.inputs.environment }}-savings-plan"
+          
+          # Execute the bootstrap command with environment-specific configuration
+          cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ github.event.inputs.region }} \
+            --qualifier $QUALIFIER \
+            --bootstrap-customer-key \
+            --cloudformation-execution-policies "arn:aws:iam::aws:policy/AdministratorAccess" \
+            --trust ${{ secrets.AWS_ACCOUNT_ID }} \
+            --tags "Environment=${{ github.event.inputs.environment }}" \
+            --tags "Service=SavingsPlanService" \
+            --tags "ManagedBy=CDK" \
+            --tags "Compliance=Regulated" \
+            --bootstrap-kms-key-id "${{ secrets.KMS_KEY_ID }}" \
+            --verbose
+          
+          echo "Bootstrap completed successfully"
+
+      - name: Record bootstrap in audit trail
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EXECUTOR="${{ github.actor }}"
+          OPERATION_ID="${{ github.run_id }}"
+          
+          # Create detailed audit record
+          aws s3 cp - s3://${{ secrets.AUDIT_BUCKET }}/bootstrap/${{ github.event.inputs.environment }}/${TIMESTAMP}-${OPERATION_ID}.json <<EOF
+          {
+            "timestamp": "${TIMESTAMP}",
+            "environment": "${{ github.event.inputs.environment }}",
+            "region": "${{ github.event.inputs.region }}",
+            "operation": "cdk-bootstrap",
+            "executor": "${EXECUTOR}",
+            "operationId": "${OPERATION_ID}",
+            "cdkVersion": "${{ env.CDK_VERSION }}",
+            "bootstrapVersion": "${{ env.CDK_BOOTSTRAP_VERSION }}",
+            "accountId": "${{ secrets.AWS_ACCOUNT_ID }}",
+            "workflowRef": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          
+          # Also send a notification about the bootstrap operation
+          aws sns publish \
+            --topic-arn ${{ secrets.INFRASTRUCTURE_NOTIFICATION_TOPIC }} \
+            --message "CDK Bootstrap completed for ${{ github.event.inputs.environment }} environment in ${{ github.event.inputs.region }}. Executed by ${{ github.actor }}." \
+            --subject "CDK Bootstrap Operation Completed"

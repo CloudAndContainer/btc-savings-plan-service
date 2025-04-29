@@ -1,18 +1,25 @@
-# Build and Release Folders
-bin-debug/
-bin-release/
-[Oo]bj/
-[Bb]in/
+*.js
+!jest.config.js
+*.d.ts
+node_modules
+project-documentation.md
+# Exclude test files and directories
+test/
 
-# Other files and folders
-.settings/
+# Exclude secrets and sensitive config
+config/secrets.*
 
-# Executables
-*.swf
-*.air
-*.ipa
-*.apk
+# Exclude macOS and OS-specific files
+.DS_Store
 
-# Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
-# should NOT be excluded as they contain compiler settings and other important
-# information for Eclipse / Flash Builder.
+# Exclude build, coverage, and log directories (if present)
+dist/
+build/
+coverage/
+logs/
+tmp/
+temp/
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out

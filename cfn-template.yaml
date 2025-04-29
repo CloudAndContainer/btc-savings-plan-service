@@ -1,0 +1,404 @@
+Description: Bitcoin Broker Savings Plan Scheduler (Development)
+Resources:
+  SavingsPlansTable5C475222:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: planId
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: planId
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TableName: bitcoin-broker-savings-plans-dev
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/SavingsPlansTable/Resource
+  TransactionsTable0A011FCB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: transactionId
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: transactionId
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TableName: bitcoin-broker-transactions-dev
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/TransactionsTable/Resource
+  DeadLetterQueue9F481546:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      QueueName: bitcoin-broker-savings-plan-dlq-dev
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/DeadLetterQueue/Resource
+  ExecutionQueueB9A87128:
+    Type: AWS::SQS::Queue
+    Properties:
+      ContentBasedDeduplication: true
+      FifoQueue: true
+      QueueName: bitcoin-broker-savings-plan-execution-dev.fifo
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
+            - DeadLetterQueue9F481546
+            - Arn
+        maxReceiveCount: 3
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ExecutionQueue/Resource
+  EventBus7B8748AA:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: bitcoin-broker-events-dev
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/EventBus/Resource
+  ScannerFunctionServiceRole2A05BEFD:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ScannerFunction/ServiceRole/Resource
+  ScannerFunctionServiceRoleDefaultPolicy945CFF2B:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:ConditionCheckItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:UpdateItem
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - SavingsPlansTable5C475222
+                  - Arn
+              - Ref: AWS::NoValue
+          - Action:
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - ExecutionQueueB9A87128
+                - Arn
+          - Action: events:PutEvents
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - EventBus7B8748AA
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: ScannerFunctionServiceRoleDefaultPolicy945CFF2B
+      Roles:
+        - Ref: ScannerFunctionServiceRole2A05BEFD
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ScannerFunction/ServiceRole/DefaultPolicy/Resource
+  ScannerFunction1B1642AE:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-000000000000-us-east-1
+        S3Key: 219d6e61334b32b9137dc97840c4bd9b328756eb704856c53beee35582b35e5d.zip
+      Environment:
+        Variables:
+          STAGE: dev
+          TABLE_NAME:
+            Ref: SavingsPlansTable5C475222
+          QUEUE_URL:
+            Ref: ExecutionQueueB9A87128
+          EVENT_BUS_NAME:
+            Ref: EventBus7B8748AA
+      FunctionName: bitcoin-broker-savings-plan-scanner-dev
+      Handler: scheduler/scanner.handler
+      MemorySize: 512
+      Role:
+        Fn::GetAtt:
+          - ScannerFunctionServiceRole2A05BEFD
+          - Arn
+      Runtime: nodejs18.x
+      Timeout: 300
+    DependsOn:
+      - ScannerFunctionServiceRoleDefaultPolicy945CFF2B
+      - ScannerFunctionServiceRole2A05BEFD
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ScannerFunction/Resource
+      aws:asset:path: asset.219d6e61334b32b9137dc97840c4bd9b328756eb704856c53beee35582b35e5d
+      aws:asset:is-bundled: false
+      aws:asset:property: Code
+  ExecutorFunctionServiceRoleA358CDD6:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ExecutorFunction/ServiceRole/Resource
+  ExecutorFunctionServiceRoleDefaultPolicy19AB9455:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - ExecutionQueueB9A87128
+                - Arn
+          - Action:
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:ConditionCheckItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:UpdateItem
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - SavingsPlansTable5C475222
+                  - Arn
+              - Ref: AWS::NoValue
+          - Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - TransactionsTable0A011FCB
+                  - Arn
+              - Ref: AWS::NoValue
+          - Action: events:PutEvents
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - EventBus7B8748AA
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: ExecutorFunctionServiceRoleDefaultPolicy19AB9455
+      Roles:
+        - Ref: ExecutorFunctionServiceRoleA358CDD6
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ExecutorFunction/ServiceRole/DefaultPolicy/Resource
+  ExecutorFunction57F3AA61:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-000000000000-us-east-1
+        S3Key: 219d6e61334b32b9137dc97840c4bd9b328756eb704856c53beee35582b35e5d.zip
+      Environment:
+        Variables:
+          STAGE: dev
+          PLANS_TABLE_NAME:
+            Ref: SavingsPlansTable5C475222
+          TRANSACTIONS_TABLE_NAME:
+            Ref: TransactionsTable0A011FCB
+          EVENT_BUS_NAME:
+            Ref: EventBus7B8748AA
+      FunctionName: bitcoin-broker-savings-plan-executor-dev
+      Handler: transaction/executor.handler
+      MemorySize: 512
+      Role:
+        Fn::GetAtt:
+          - ExecutorFunctionServiceRoleA358CDD6
+          - Arn
+      Runtime: nodejs18.x
+      Timeout: 300
+    DependsOn:
+      - ExecutorFunctionServiceRoleDefaultPolicy19AB9455
+      - ExecutorFunctionServiceRoleA358CDD6
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ExecutorFunction/Resource
+      aws:asset:path: asset.219d6e61334b32b9137dc97840c4bd9b328756eb704856c53beee35582b35e5d
+      aws:asset:is-bundled: false
+      aws:asset:property: Code
+  ExecutorFunctionSqsEventSourceBitcoinBrokerSavingsPlanSchedulerDevExecutionQueueCD3F4394E42C7080:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      EventSourceArn:
+        Fn::GetAtt:
+          - ExecutionQueueB9A87128
+          - Arn
+      FunctionName:
+        Ref: ExecutorFunction57F3AA61
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ExecutorFunction/SqsEventSource:BitcoinBrokerSavingsPlanSchedulerDevExecutionQueueCD3F4394/Resource
+  ScannerScheduleRule0612C99A:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: bitcoin-broker-savings-plan-scanner-dev
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - ScannerFunction1B1642AE
+              - Arn
+          Id: Target0
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ScannerScheduleRule/Resource
+  ScannerScheduleRuleAllowEventRuleBitcoinBrokerSavingsPlanSchedulerDevScannerFunctionE5540B0661E6B760:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Fn::GetAtt:
+          - ScannerFunction1B1642AE
+          - Arn
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - ScannerScheduleRule0612C99A
+          - Arn
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ScannerScheduleRule/AllowEventRuleBitcoinBrokerSavingsPlanSchedulerDevScannerFunctionE5540B06
+  ScannerErrorsAlarm273EA4CA:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bitcoin-Broker-SavingsPlan-Scanner-Errors-dev
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: ScannerFunction1B1642AE
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ScannerErrorsAlarm/Resource
+  ExecutorErrorsAlarm91BE01C0:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bitcoin-Broker-SavingsPlan-Executor-Errors-dev
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: ExecutorFunction57F3AA61
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/ExecutorErrorsAlarm/Resource
+  DLQMessagesAlarmF4A314F6:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bitcoin-Broker-SavingsPlan-DLQ-Messages-dev
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt:
+              - DeadLetterQueue9F481546
+              - QueueName
+      EvaluationPeriods: 1
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Period: 300
+      Statistic: Maximum
+      Threshold: 1
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/DLQMessagesAlarm/Resource
+  QueueDepthAlarmD4A3A893:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: Bitcoin-Broker-SavingsPlan-Queue-Depth-dev
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt:
+              - ExecutionQueueB9A87128
+              - QueueName
+      EvaluationPeriods: 2
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Period: 300
+      Statistic: Maximum
+      Threshold: 100
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/QueueDepthAlarm/Resource
+  CDKMetadata:
+    Type: AWS::CDK::Metadata
+    Properties:
+      Analytics: v2:deflate64:H4sIAAAAAAAA/+1WbY8aNxD+LfHHyLe9XPqlfIMLkU5JKgJUVYROp8Eelsl5x3t+gdDV/vfKXnaBpDq1lapKTT8gr+cZ+5l3c1O8+um6uH4Be3+l9OOVoXXRLAKoRwl7/9DoA0Nl9bpolrA2uGpESOvPUKEYiZdCihpcoECW3+FBjBrBJygc6vS5EK0U3rrwvMaajCEuP1idRLPxp4fZdP4wn378ZbpYJiJLHO54SRXOUdkdusOiRkUbUpD409V/oDPlZLAWo+AitlI4rOwOzMwaUgcxEg4DEItW/nddu5e3G875a6V/8kXzMWJMuXxK65nDDgNyIpyhI6uzNAXma70NbWzHKoWynA5NwKN+gzrWZjC6U9AI+j2GgC7TJl+euo98VwVf5qiQdnhrI4eOszM567cSd8jBF800rZPoV00H93s5j7kyXbzInldb1NEM+QBXYvCDT6B1vmAGyTQWo5V4Ke6PyDIri1Gi6sgSRysNVGsNRfM2sko+rhqxOX6ehzFyoGG3BdYG3XGnuhrIFlGFNoY+DlhZd1jQbz2MvCNnuULuVYIDRVyKkXhDvku9FMaW8z5tF86dH1/l8yf//gnw/0AkMBdLXx4yV9jCRqfwA9Q1cZknaFdc+cwagtqeOVvBl0kSEZe/Emu7P8lvLavoHHJu7q5fa+tC1r8LWL0FMtGhH+J2HA/d7mTK2PHQyCag8xe7KSt3qIcopoQER8rfWt5Q2UX21H8XziXpDF1F3pPlVhJURTO3uTvB+1ihnuQ5WTtiRTWYsVJD18ujTjowVmdpFBUwlKjzYKPk36q5kB16j9qhge2sp+jHYe7lhIYAanvHhhgHbEjss+Dz9z6Pfufu/120G77WoOzEudN6Q5c2Id/Y/61Y60WAgKlZ/QXtnxb/S7R/SZxj1YWplf71A3iPwRfjtEj/uphE9Yj5pV7dS2Vs1Ps0OopmbMBVqUfTeja/u85PFbsHx8Rl/3yKsHXot9acpguYCKe/Dmfv7Pd6Z85Gjmzbyjn6PCj7h6L/3cucnUWAkrhsJVuNxWf/w+7mpnj1Y3H94rMnujq+o8W8W38HwOr2RrULAAA=
+    Metadata:
+      aws:cdk:path: BitcoinBroker-SavingsPlanScheduler-Dev/CDKMetadata/Default
+Parameters:
+  BootstrapVersion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cdk-bootstrap/hnb659fds/version
+    Description: Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]
+
